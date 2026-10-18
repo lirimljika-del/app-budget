@@ -29,6 +29,12 @@
   const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
   const monthLabel = ym => { const { y, m } = ymParts(ym); return `${MONTHS[m - 1]} ${y}`; };
   const clampDay = (ym, day) => Math.min(Math.max(1, day || 1), dimOf(ym));
+  // Arithmétique de dates en UTC sur des entiers de jours : insensible aux fuseaux et à l'heure d'été.
+  const dayNum = iso => Math.floor(Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10)) / 86400000);
+  const fromDayNum = n => { const d = new Date(n * 86400000); return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`; };
+  const addDays = (iso, n) => fromDayNum(dayNum(iso) + n);
+  const diffDays = (a, b) => dayNum(b) - dayNum(a);
+  const addMonthsClamp = (iso, n, anchorDay) => { const ym = addMonths(iso.slice(0, 7), n); return `${ym}-${pad(Math.min(anchorDay || +iso.slice(8, 10), dimOf(ym)))}`; };
 
   // ---------- Argent (centimes entiers) ----------
   function parseMoney(input) {
@@ -54,15 +60,22 @@
 
   // ---------- Données ----------
   const DEFAULT_CATEGORIES = [
-    { id: 'essence', name: 'Essence', icon: '⛽', color: '#FF9F0A' },
-    { id: 'courses', name: 'Alimentation / courses', icon: '🛒', color: '#30D158' },
-    { id: 'restaurants', name: 'Restaurants', icon: '🍽️', color: '#FF453A' },
-    { id: 'loisirs', name: 'Loisirs', icon: '🎬', color: '#BF5AF2' },
-    { id: 'shopping', name: 'Shopping', icon: '🛍️', color: '#FF375F' },
-    { id: 'sante', name: 'Santé', icon: '💊', color: '#64D2FF' },
-    { id: 'transport', name: 'Transport', icon: '🚆', color: '#5E5CE6' },
-    { id: 'divers', name: 'Divers', icon: '✨', color: '#8E8E93' },
+    { id: 'essence', name: 'Essence', icon: '⛽', color: '#c07a2c' },
+    { id: 'courses', name: 'Alimentation / courses', icon: '🛒', color: '#4f8a6a' },
+    { id: 'restaurants', name: 'Restaurants', icon: '🍽️', color: '#b5453a' },
+    { id: 'loisirs', name: 'Loisirs', icon: '🎬', color: '#7b5ea7' },
+    { id: 'shopping', name: 'Shopping', icon: '🛍️', color: '#b0577a' },
+    { id: 'sante', name: 'Santé', icon: '💊', color: '#4a8fa8' },
+    { id: 'transport', name: 'Transport', icon: '🚆', color: '#4a5fa0' },
+    { id: 'abonnements', name: 'Abonnements', icon: '🔁', color: '#3d7f95' },
+    { id: 'divers', name: 'Divers', icon: '✨', color: '#8a8681' },
   ];
+  const SUB_FREQ = {
+    weekly: { days: 7, perYear: 52, label: 'Hebdomadaire' }, monthly: { months: 1, perYear: 12, label: 'Mensuelle' },
+    quarterly: { months: 3, perYear: 4, label: 'Trimestrielle' }, semiannual: { months: 6, perYear: 2, label: 'Semestrielle' },
+    annual: { months: 12, perYear: 1, label: 'Annuelle' },
+  };
+  const SUB_STATUS = { active: 'Actif', paused: 'Suspendu', cancelled: 'Résilié' };
   const BILL_CATEGORIES = ['Loyer', 'Assurance maladie', 'Assurance auto', 'Autre assurance', 'Téléphone', 'Internet', 'Abonnement', 'Leasing', 'Impôts', 'Autre'];
   const STEP = { monthly: 1, quarterly: 3, semiannual: 6, annual: 12 };
   const FREQ_LABEL = { monthly: 'Mensuelle', quarterly: 'Trimestrielle', semiannual: 'Semestrielle', annual: 'Annuelle' };
@@ -74,10 +87,26 @@
   function defaultState() {
     return {
       schema: 1,
-      settings: { currency: 'CHF', theme: 'auto', hideAmounts: false },
+      settings: { currency: 'CHF', theme: 'auto', hideAmounts: false, smoothSubs: false, importDateMode: 'tx', dashOrder: null, ownAccounts: [], keepPdf: false },
       categories: DEFAULT_CATEGORIES.map(c => ({ ...c, builtin: true, limits: [] })),
-      incomes: [], bills: [], expenses: [], goals: [],
+      incomes: [], bills: [], expenses: [], goals: [], subs: [], imports: [], importKeys: [], rules: {},
     };
+  }
+  // Met à niveau un état plus ancien (idempotent) : aucune donnée existante n'est modifiée.
+  function migrate(st) {
+    const d = defaultState();
+    st.settings = { ...d.settings, ...(st.settings || {}) };
+    for (const k of ['subs', 'imports', 'importKeys']) if (!Array.isArray(st[k])) st[k] = [];
+    if (!st.rules || typeof st.rules !== 'object') st.rules = {};
+    // Teintes plus sobres (cosmétique) pour les catégories d'origine.
+    const OLD = { essence: '#FF9F0A', courses: '#30D158', restaurants: '#FF453A', loisirs: '#BF5AF2', shopping: '#FF375F', sante: '#64D2FF', transport: '#5E5CE6', divers: '#8E8E93' };
+    for (const c of st.categories) { const n = DEFAULT_CATEGORIES.find(x => x.id === c.id); if (n && c.builtin && OLD[c.id] === c.color) c.color = n.color; }
+    if (!st.categories.some(c => c.id === 'abonnements')) {
+      const i = st.categories.findIndex(c => c.id === 'divers');
+      const c = { ...DEFAULT_CATEGORIES.find(x => x.id === 'abonnements'), builtin: true, limits: [] };
+      if (i >= 0) st.categories.splice(i, 0, c); else st.categories.push(c);
+    }
+    return st;
   }
 
   function valueAt(versions, ym) {
@@ -168,6 +197,136 @@
   }
   function savedTotal(state, ym) { return sum(state.goals, g => goalSummary(g, ym).saved); }
 
+  // ---------- Abonnements ----------
+  // Échéances = dates générées depuis l'ancre de chaque « version » (changement de prix / renouvellement),
+  // avec ramené en fin de mois (31 → 30/28/29) tout en gardant le jour d'origine.
+  function subCancelDate(sub) {
+    if (sub.cancelDate) return sub.cancelDate;
+    if (sub.status !== 'cancelled') return null;
+    const keys = Object.keys(sub.paid || {}).sort();
+    return keys.length ? addDays(keys[keys.length - 1], 1) : (sub.versions[0] ? sub.versions[0].from : '0000-01-01');
+  }
+  const inGap = (sub, due) => (sub.gaps || []).some(g => due >= g.from && (!g.to || due < g.to));
+  function subDueDates(sub, from, to) {
+    const vs = (sub.versions || []).slice().sort((a, b) => (a.from < b.from ? -1 : 1));
+    const cancel = subCancelDate(sub), out = [];
+    vs.forEach((v, i) => {
+      const segEnd = i + 1 < vs.length ? vs[i + 1].from : null, f = SUB_FREQ[v.freq || 'monthly'], day = +v.from.slice(8, 10);
+      for (let k = 0; k < 5000; k++) {
+        const due = f.days ? addDays(v.from, f.days * k) : addMonthsClamp(v.from, f.months * k, day);
+        if (due > to || (segEnd && due >= segEnd) || (cancel && due >= cancel)) break;
+        if (due < from || inGap(sub, due)) continue;
+        out.push({ due, amount: v.amount, freq: v.freq || 'monthly', first: due === v.from, estimated: due !== v.from && !(sub.paid && sub.paid[due]) });
+      }
+    });
+    return out.sort((a, b) => (a.due < b.due ? -1 : 1));
+  }
+  function subOccurrences(state, ym, today) {
+    const out = [], from = `${ym}-01`, to = `${ym}-${pad(dimOf(ym))}`;
+    for (const s of state.subs || []) {
+      for (const d of subDueDates(s, from, to)) {
+        const paidDate = (s.paid && s.paid[d.due]) || null;
+        out.push({ id: s.id, name: s.name, category: s.category, amount: d.amount, dueDate: d.due, paidDate, freq: d.freq, estimated: d.estimated, sub: true,
+          status: paidDate ? 'paid' : (today && d.due < today ? 'overdue' : 'pending') });
+      }
+    }
+    return out.sort((a, b) => (a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : 0));
+  }
+  const subVersionAt = (sub, iso) => { let r = null; for (const v of sub.versions || []) if (v.from <= iso && (!r || v.from >= r.from)) r = v; return r || (sub.versions || [])[0] || null; };
+  const monthlyEquivalent = (amount, freq) => Math.round(amount * SUB_FREQ[freq || 'monthly'].perYear / 12);
+  const annualCost = (amount, freq) => amount * SUB_FREQ[freq || 'monthly'].perYear;
+  // Provision mensuelle (option) pour les abonnements trimestriels / semestriels / annuels :
+  // dès le mois suivant le 1er prélèvement (ou `provisionFrom`), on réserve le coût mensuel moyen et les
+  // prélèvements eux-mêmes ne sont plus déduits (ils sont couverts par la provision) → aucune double comptabilisation.
+  function subProvision(state, ym) {
+    const res = { on: !!(state.settings && state.settings.smoothSubs), total: 0, items: [], smoothed: new Set() };
+    if (!res.on) return res;
+    const mStart = `${ym}-01`, mEnd = `${ym}-${pad(dimOf(ym))}`;
+    for (const s of state.subs || []) {
+      const v = subVersionAt(s, mEnd);
+      if (!v || !['quarterly', 'semiannual', 'annual'].includes(v.freq)) continue;
+      const cancel = subCancelDate(s);
+      const startsAt = s.provisionFrom || addMonths(s.versions[0].from.slice(0, 7), 1);
+      if (ym < startsAt || (cancel && cancel.slice(0, 7) <= ym)) continue;
+      if ((s.gaps || []).some(g => g.from <= mStart && (!g.to || g.to > mEnd))) continue;
+      const amount = monthlyEquivalent(v.amount, v.freq);
+      res.items.push({ id: s.id, name: s.name, amount }); res.total += amount; res.smoothed.add(s.id);
+    }
+    return res;
+  }
+  function nextDue(sub, today) {
+    const d = subDueDates(sub, today, addDays(today, 3 * 366));
+    return d.length ? d[0] : null;
+  }
+  function lastPaidOf(sub) { const k = Object.keys(sub.paid || {}).sort(); return k.length ? { due: k[k.length - 1], paidDate: sub.paid[k[k.length - 1]] } : null; }
+  function subsSummary(state, today) {
+    const act = (state.subs || []).filter(s => s.status === 'active' && !(subCancelDate(s) && subCancelDate(s) <= today));
+    let monthly = 0, annual = 0, next = null;
+    const upcoming = [];
+    for (const s of act) {
+      const v = subVersionAt(s, today); if (!v) continue;
+      monthly += monthlyEquivalent(v.amount, v.freq); annual += annualCost(v.amount, v.freq);
+      for (const d of subDueDates(s, today, addDays(today, 60))) upcoming.push({ sub: s, ...d, daysLeft: diffDays(today, d.due) });
+    }
+    upcoming.sort((a, b) => (a.due < b.due ? -1 : 1));
+    if (upcoming.length) next = upcoming[0];
+    const m = computeMonth(state, today.slice(0, 7), today);
+    return { count: act.length, monthly, annual, next, upcoming, plannedThisMonth: m.subsActual, countedThisMonth: m.subsTotal };
+  }
+  function upcomingReminders(state, today) {
+    const out = [];
+    for (const s of state.subs || []) {
+      if (s.status !== 'active' || !(s.reminders || []).length) continue;
+      for (const d of subDueDates(s, today, addDays(today, 8))) {
+        const left = diffDays(today, d.due);
+        if (s.reminders.includes(left) && !(s.paid && s.paid[d.due])) out.push({ sub: s, ...d, daysLeft: left });
+      }
+    }
+    return out;
+  }
+  function subsToIcs(state, today, months = 12) {
+    const esc = t => String(t).replace(/([,;\\])/g, '\\$1').replace(/\n/g, '\\n');
+    const to = addDays(today, months * 31), L = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Budget perso//FR', 'CALSCALE:GREGORIAN'];
+    for (const s of state.subs || []) {
+      if (s.status === 'cancelled') continue;
+      for (const d of subDueDates(s, today, to)) {
+        L.push('BEGIN:VEVENT', `UID:${s.id}-${d.due}@budget-perso`, `DTSTAMP:${today.replace(/-/g, '')}T000000Z`, `DTSTART;VALUE=DATE:${d.due.replace(/-/g, '')}`,
+          `SUMMARY:${esc(s.name + ' — ' + formatMoney(d.amount) + ' ' + (state.settings.currency || 'CHF'))}`, `DESCRIPTION:${esc('Prélèvement' + (d.estimated ? ' (date estimée)' : ''))}`);
+        for (const r of s.reminders || []) L.push('BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${esc(s.name)}`, `TRIGGER:-P${r}D`, 'END:VALARM');
+        L.push('END:VEVENT');
+      }
+    }
+    L.push('END:VCALENDAR');
+    return L.join('\r\n');
+  }
+  function addSub(state, f) {
+    mustCents(f.amount, 'montant');
+    const start = f.startDate, last = f.lastPaid || null;
+    const anchor = f.nextDue || (last ? last : start);
+    if (![start, anchor].every(isValidDate) || (last && !isValidDate(last))) throw new Error('Date invalide');
+    const sub = { id: uid(), name: f.name, category: f.category || 'Abonnement', method: f.method || '', notes: f.notes || '', status: f.status || 'active', provisionFrom: f.provisionFrom || null,
+      startDate: start, cancelDate: f.cancelDate || null, reminders: f.reminders || [], gaps: [], paid: {},
+      versions: [{ from: anchor, amount: f.amount, freq: f.freq || 'monthly' }] };
+    if (last && !f.nextDue) sub.paid[last] = last;     // le dernier paiement est l'ancre de la série
+    state.subs.push(sub);
+    return sub;
+  }
+  function setSubPaid(sub, due, paidDateOrNull) { sub.paid = sub.paid || {}; if (paidDateOrNull) sub.paid[due] = paidDateOrNull; else delete sub.paid[due]; }
+  // Changement de prix (ou de fréquence) à partir d'une échéance : le passé ne bouge pas.
+  function changeSubPrice(sub, fromDue, amount, freq) {
+    mustCents(amount);
+    const base = subVersionAt(sub, fromDue);
+    setVersion(sub.versions, { from: fromDue, amount, freq: freq || (base && base.freq) || 'monthly' });
+  }
+  function setSubStatus(sub, status, today) {
+    if (status === sub.status) return sub;
+    const open = (sub.gaps || []).find(g => !g.to);
+    if (status === 'paused') { sub.gaps = sub.gaps || []; if (!open) sub.gaps.push({ from: today, to: null }); sub.cancelDate = null; }
+    else if (status === 'cancelled') { if (open) open.to = today; sub.cancelDate = today; }
+    else if (status === 'active') { if (open) open.to = today; sub.cancelDate = null; }
+    sub.status = status; return sub;
+  }
+
   // ---------- Calcul du mois ----------
   function categorySummary(state, ym, expenses) {
     const rows = state.categories.map(c => {
@@ -199,6 +358,8 @@
     const expenses = state.expenses.filter(e => e.date.slice(0, 7) === ym)
       .sort((a, b) => (a.date === b.date ? (a.ts || 0) - (b.ts || 0) : a.date < b.date ? -1 : 1));
     const savings = savingsPlan(state, ym);
+    const subsOcc = subOccurrences(state, ym, today);
+    const prov = subProvision(state, ym);
 
     const income = sum(incomes, i => i.amount);
     const billsTotal = sum(bills, b => b.amount);           // payées ET impayées : comptées UNE seule fois
@@ -206,7 +367,11 @@
     const billsUnpaid = billsTotal - billsPaid;
     const spent = sum(expenses, e => e.amount);
     const reserved = savings.total;
-    const remaining = income - billsTotal - spent - reserved;
+    const subsActual = sum(subsOcc, b => b.amount);
+    const subsPaid = sum(subsOcc.filter(b => b.status === 'paid'), b => b.amount);
+    // Lissage facultatif : les abonnements non mensuels sont provisionnés chaque mois (jamais comptés deux fois).
+    const subsTotal = prov.on ? sum(subsOcc.filter(o => !prov.smoothed.has(o.id)), b => b.amount) + prov.total : subsActual;
+    const remaining = income - billsTotal - subsTotal - spent - reserved;
 
     const spentToday = rel === 'current' ? sum(expenses.filter(e => e.date === today), e => e.amount) : 0;
     const daily = { mode: 'ok', perDay: null, deficit: 0, todayAllowance: null, todayLeft: null, spentToday };
@@ -225,17 +390,19 @@
     let forecast = { available: false };
     if (rel === 'current') {
       const projectedSpent = Math.round(spent * dim / dayNum);
-      const projectedEnd = income - billsTotal - reserved - projectedSpent;
+      const projectedEnd = income - billsTotal - subsTotal - reserved - projectedSpent;
       forecast = {
         available: true, avgDaily: Math.round(spent / dayNum), projectedSpent, projectedEnd,
         overBudget: projectedEnd < 0 ? -projectedEnd : 0, lowConfidence: dayNum < 5,
       };
     }
 
-    const committed = billsTotal + spent + reserved;
+    const committed = billsTotal + subsTotal + spent + reserved;
     return {
       ym, rel, dim, dayNum, daysLeft, income, incomes, bills, billsTotal, billsPaid, billsUnpaid,
-      billsOverdue: bills.filter(b => b.status === 'overdue'), spent, expenses, reserved, savings, remaining,
+      billsOverdue: bills.filter(b => b.status === 'overdue'), subsOcc, subsActual, subsPaid, subsUnpaid: subsActual - subsPaid,
+      subsTotal, subsProvision: prov.on ? prov.total : 0, subsSmoothed: prov.on,
+      subsOverdue: subsOcc.filter(b => b.status === 'overdue'), spent, expenses, reserved, savings, remaining,
       daily, cats, forecast,
       pctMonth: rel === 'current' ? Math.round(dayNum * 100 / dim) : rel === 'past' ? 100 : 0,
       pctBudget: income > 0 ? Math.round(committed * 100 / income) : null,
@@ -249,7 +416,7 @@
     for (let i = n - 1; i >= 0; i--) months.push(computeMonth(state, addMonths(endYm, -i), today));
     const prev = [];
     for (let i = 2 * n - 1; i >= n; i--) prev.push(computeMonth(state, addMonths(endYm, -i), today));
-    const income = sum(months, m => m.income), billsTotal = sum(months, m => m.billsTotal);
+    const income = sum(months, m => m.income), billsTotal = sum(months, m => m.billsTotal), subsTotal = sum(months, m => m.subsTotal);
     const spent = sum(months, m => m.spent), reserved = sum(months, m => m.reserved);
     // Mois en cours : on le compare au mois précédent jusqu'au même jour (comparaison équitable).
     const lastM = months[months.length - 1];
@@ -265,10 +432,10 @@
     const biggest = all.reduce((b, e) => (!b || e.amount > b.amount ? e : b), null);
     const daysCounted = sum(months, m => m.rel === 'current' ? m.dayNum : m.rel === 'past' ? m.dim : 0);
     return {
-      months, income, billsTotal, spent, reserved, remaining: income - billsTotal - spent - reserved,
+      months, income, billsTotal, subsTotal, spent, reserved, remaining: income - billsTotal - subsTotal - spent - reserved,
       categories, topCategory: categories[0] || null, biggest,
       avgDaily: daysCounted ? Math.round(spent / daysCounted) : 0,
-      pctIncomeSpent: income > 0 ? Math.round((billsTotal + spent) * 100 / income) : null,
+      pctIncomeSpent: income > 0 ? Math.round((billsTotal + subsTotal + spent) * 100 / income) : null,
       prevSpent, deltaPct: prevSpent > 0 ? Math.round((spent - prevSpent) * 100 / prevSpent) : null,
       savedSeries: months.map(m => ({ ym: m.ym, saved: savedTotal(state, m.ym) })),
     };
@@ -292,9 +459,16 @@
   }
   function updateExpense(state, id, ch) {
     const e = state.expenses.find(x => x.id === id); if (!e) throw new Error('Dépense introuvable');
-    if ('amount' in ch) { mustCents(ch.amount); if (ch.amount <= 0) throw new Error('Le montant doit être positif'); }
+    if ('amount' in ch) { mustCents(ch.amount); if (e.amount < 0 ? ch.amount >= 0 : ch.amount <= 0) throw new Error(e.amount < 0 ? 'Montant négatif requis pour un remboursement' : 'Le montant doit être positif'); }
     if ('date' in ch && !isValidDate(ch.date)) throw new Error('Date invalide');
     Object.assign(e, ch); return e;
+  }
+  // Remboursement / retour de paiement : dépense négative, rattachée à la dépense d'origine si connue.
+  function addRefund(state, { amount, category, date, desc = '', refundOf = null }) {
+    mustCents(amount); if (amount <= 0) throw new Error('Montant de remboursement positif requis');
+    if (!isValidDate(date)) throw new Error('Date invalide');
+    const e = { id: uid(), amount: -amount, category, date, desc, method: '', refundOf, ts: Date.now() };
+    state.expenses.push(e); return e;
   }
   function deleteExpense(state, id) { state.expenses = state.expenses.filter(e => e.id !== id); }
 
@@ -396,6 +570,9 @@
       if (x.type === 'oneoff') { if (!Number.isInteger(x.amount) || !isValidDate(x.date)) errs.push(`Revenu ${i + 1} invalide`); }
       else if (!x.versions || !x.versions.length || !x.versions.every(v => Number.isInteger(v.amount))) errs.push(`Revenu récurrent ${i + 1} invalide`);
     });
+    (s.subs || []).forEach((x, i) => {
+      if (!x.versions || !x.versions.length || !x.versions.every(v => Number.isInteger(v.amount) && isValidDate(v.from) && SUB_FREQ[v.freq || 'monthly'])) errs.push(`Abonnement ${i + 1} invalide`);
+    });
     s.goals.forEach((g, i) => { if (!/^\d{4}-\d{2}$/.test(g.startMonth || '') || !g.versions) errs.push(`Objectif ${i + 1} invalide`); });
     return errs;
   }
@@ -406,8 +583,7 @@
     if (!data) throw new Error('Ce fichier n’est pas une sauvegarde de cette application');
     const errs = validateState(data);
     if (errs.length) throw new Error('Sauvegarde invalide : ' + errs.slice(0, 3).join(' ; '));
-    data.settings = { ...defaultState().settings, ...(data.settings || {}) };
-    return data;
+    return migrate(data);
   }
 
   return {
@@ -416,6 +592,9 @@
     incomeOccurrences, billOccurrences, goalSchedule, goalSummary, savingsPlan, savedTotal, computeMonth, rangeStats, dailySeries,
     addExpense, updateExpense, deleteExpense, addIncome, addBill, editRecurring, updateOneoff, clearOverride, stopRecurring,
     removeItem, setBillPaid, duplicateBill, addGoal, setGoalMonthly, setCategoryLimit, addCategory, deleteCategory,
-    validateState, exportData, parseImport,
+    validateState, exportData, parseImport, migrate,
+    dayNum, fromDayNum, addDays, diffDays, addMonthsClamp, SUB_FREQ, SUB_STATUS, subDueDates, subOccurrences, subProvision, subVersionAt,
+    monthlyEquivalent, annualCost, nextDue, lastPaidOf, subsSummary, upcomingReminders, subsToIcs, addSub, setSubPaid, changeSubPrice,
+    setSubStatus, subCancelDate, addRefund,
   };
 });

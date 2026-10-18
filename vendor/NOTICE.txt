@@ -1,0 +1,4 @@
+Bibliothèques tierces embarquées localement (aucun chargement externe) :
+- pdf.js 6.4.299 (Mozilla) — Apache-2.0 — build legacy
+- tesseract.js 7.0.0, tesseract.js-core 7.0.0 — Apache-2.0
+- Données de langue Tesseract fra/eng (4.0.0_best_int) — Apache-2.0

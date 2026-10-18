@@ -1,7 +1,7 @@
 /* Persistance (IndexedDB), sauvegardes automatiques internes, verrouillage PIN / Face ID. */
 (function () {
   'use strict';
-  const DB_NAME = 'budget-perso', DB_VER = 1;
+  const DB_NAME = 'budget-perso', DB_VER = 2;
   let dbp = null;
 
   function openDB() {
@@ -9,7 +9,7 @@
     dbp = new Promise((resolve, reject) => {
       if (!window.indexedDB) return reject(new Error('IndexedDB indisponible'));
       const r = indexedDB.open(DB_NAME, DB_VER);
-      r.onupgradeneeded = () => { const db = r.result; db.createObjectStore('kv'); db.createObjectStore('backups'); };
+      r.onupgradeneeded = () => { const db = r.result; for (const n of ['kv', 'backups', 'pdfs']) if (!db.objectStoreNames.contains(n)) db.createObjectStore(n); };
       r.onsuccess = () => resolve(r.result);
       r.onerror = () => reject(r.error);
     });
@@ -72,6 +72,11 @@
       for (const k of ks) { const v = await get('backups', k); out.push({ key: k, at: v.at, label: v.label || 'auto', data: v.data }); }
       return out;
     },
+    // PDF originaux (facultatif, désactivé par défaut) : jamais inclus dans l'export JSON.
+    async putPdf(id, bytes) { await put('pdfs', id, bytes); },
+    async getPdf(id) { return get('pdfs', id); },
+    async delPdf(id) { await del('pdfs', id); },
+    async clearPdfs() { const ks = await keys('pdfs'); for (const k of ks) await del('pdfs', k); },
     async persist() { try { return navigator.storage && navigator.storage.persist ? await navigator.storage.persist() : false; } catch { return false; } },
     get usingFallback() { return useLS; },
 
