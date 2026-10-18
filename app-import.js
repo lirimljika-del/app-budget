@@ -65,6 +65,7 @@
       progressSheet('Analyse des transactions…');
       const parsed = I.parseStatement(r.lines, { ocr: r.ocr, defaultYear: Number(todayStr().slice(0, 4)) });
       if (!parsed.txs.length) throw new X.PdfError('empty', 'Aucune transaction reconnue. ' + (parsed.warnings[0] || '') + ' Si ta banque propose un autre format de relevé (ex. « détail des écritures »), essaie-le, ou envoie-moi un exemple expurgé pour adapter la lecture.');
+      imp.lines = r.lines;
       imp.hash = I.hashText(r.lines.map(l => l.cells.map(c => c.text).join(' ')).join('\n'));
       imp.preview = I.buildPreview(st(), parsed, { today: todayStr() });
       imp.preview.rows.forEach(x => { x.reviewed = false; });
@@ -93,6 +94,7 @@
     const pendingUnc = unc.filter(r => !r.reviewed || !r.include).length;
     let h = `<button class="back" data-act="impCancel">${ic('chevL')}Annuler l’import</button><div class="page-title">Vérification</div>
       <div class="note" style="margin:-8px 2px 10px">${esc(pv.bank)}${pv.account ? ' · ' + esc(pv.account) : ''}${pv.period ? ' · ' + E.fmtDate(pv.period.from) + ' → ' + E.fmtDate(pv.period.to) + (pv.period.inferred ? ' (déduite)' : '') : ''} · ${esc(imp.fileName)}</div>`;
+    h += `<div style="margin:-2px 2px 8px"><button class="link" data-act="impShowText">Voir le texte lu dans le PDF (diagnostic)</button></div>`;
     if (imp.sameFile) h += `<div class="alert warn"><span>⚠️</span><span>Ce relevé a déjà été importé le ${E.fmtDate(imp.sameFile.at.slice(0, 10))}. Les transactions déjà enregistrées seront ignorées.</span></div>`;
     if (pv.ocr) h += `<div class="alert warn"><span>👁️</span><span><b>PDF scanné (OCR).</b> La lecture peut contenir des erreurs de chiffres : vérifie chaque ligne avant de valider.</span></div>`;
     for (const w of pv.warnings) h += `<div class="alert warn"><span>⚠️</span><span>${esc(w)}</span></div>`;
@@ -124,6 +126,12 @@
   };
   App.pageTab.importPreview = 'expenses';
 
+  A.impShowText = function () {
+    const txt = (imp.lines || []).map(l => l.cells.map(c => c.text).join('  |  ')).join('\n');
+    openSheet(`<h3>Texte lu dans le PDF</h3><p class="note" style="margin:-6px 2px 10px">Utile si une ligne est mal comprise (revenu/dépense, description, catégorie). Masque les noms et numéros avant de partager.</p>
+      <textarea class="in" id="imp-raw" readonly style="min-height:260px">${esc(txt)}</textarea><div class="actions"><button class="btn" data-act="impCopyText">Copier le texte</button></div>`);
+  };
+  A.impCopyText = async function () { const el = document.getElementById('imp-raw'); try { await navigator.clipboard.writeText(el.value); toast('Texte copié'); } catch { el.select(); toast('Sélectionne et copie le texte'); } };
   A.impToggleSure = () => { imp.openSure = !imp.openSure; render(); };
   A.impValidateSure = () => { imp.preview.rows.forEach(r => { if (!r.uncertain && !r.dupOf) r.reviewed = true; }); render(); };
   A.impCancel = () => confirmSheet('Annuler l’import ?', 'Rien n’a été enregistré. Le PDF est oublié.', [{ label: 'Abandonner l’import', cls: 'danger', fn: () => { imp.preview = null; imp.pdfBytes = null; ui.page = null; go('expenses'); } }]);
@@ -214,8 +222,8 @@
     return h;
   };
   App.pageTab.importReport = 'expenses';
-  A.impDone = () => { imp.report = null; ui.page = null; ui.viewMonth = todayStr().slice(0, 7); go('home'); };
-  A.impSeeExpenses = () => { const m = imp.report && imp.report.res.months[0]; imp.report = null; ui.page = null; ui.viewMonth = m || todayStr().slice(0, 7); go('expenses'); };
+  A.impDone = () => { imp.report = null; ui.page = null; ui.viewMonth = App.curYm(); go('home'); };
+  A.impSeeExpenses = () => { const m = imp.report && imp.report.res.months[0]; imp.report = null; ui.page = null; ui.viewMonth = m || App.curYm(); go('expenses'); };
   A.impUndo = () => confirmSheet('Annuler cet import ?', 'Toutes les opérations créées par cet import sont retirées et les factures/abonnements rapprochés redeviennent « à payer ».', [{ label: 'Annuler l’import', cls: 'danger', fn: async () => { const id = imp.report.importId; await commit(() => I.undoImport(st(), id), { msg: 'Import annulé' }); imp.report = null; ui.page = null; go('expenses'); } }]);
 
   // ----- Historique -----

@@ -64,13 +64,15 @@
   }
   const AMT_RE = /^([+-])?\s*((?:\d{1,3}(?:[’'`´   ]\d{3})+|\d+)[.,]\d{2})\s*([+-]|CR|DB|H|S)?$/i;
   function parseAmountCell(t) {
+    let cur = null;
+    t = t.trim().replace(/^(CHF|EUR|USD|GBP|Fr\.?)\s*/i, (x, c) => { cur = c.toUpperCase().replace(/^FR\.?$/, 'CHF'); return ''; }).replace(/\s*(CHF|EUR|USD|GBP)$/i, (x, c) => { cur = c.toUpperCase(); return ''; });
     const m = AMT_RE.exec(t.trim()); if (!m) return null;
     const cents = E.parseMoney(m[2].replace(/[’'`´   ]/g, ''));
     if (cents == null) return null;
     let sign = 0;
     if (m[1] === '-' || m[3] === '-' || /^db$/i.test(m[3] || '') || /^s$/i.test(m[3] || '')) sign = -1;
     else if (m[1] === '+' || m[3] === '+' || /^cr$/i.test(m[3] || '') || /^h$/i.test(m[3] || '')) sign = 1;
-    return { cents, sign };
+    return { cents, sign, cur };
   }
   const CUR_RE = /\b(EUR|USD|GBP|JPY|CAD|AUD|SEK|NOK|DKK|CHF)\b/;
 
@@ -78,6 +80,8 @@
   const HDR_DEBIT = /^(d[eé]bits?|belastung(?:en)?|soll|sorties?|retraits?)\b/i;
   const HDR_CREDIT = /^(cr[eé]dits?|gutschrift(?:en)?|haben|entr[eé]es?|d[eé]p[oô]ts?)\b/i;
   const HDR_BAL = /^(solde|saldo|balance|kontostand)\b/i;
+  const TYPE_DEBIT = /^(d[eé]bit|belastung|db|d|soll|sortie)$/i, TYPE_CREDIT = /^(cr[eé]dit|gutschrift|cr|c|haben|entr[eé]e)$/i;
+  const CREDIT_WORDS = /\b(salaire|lohn|gehalt|cr[eé]dit(?! ?card)|gutschrift|versement|einzahlung|encaissement|virement re[cç]u|d[eé]p[oô]t|remboursement|r[uü]ckerstattung|int[eé]r[eê]ts?|zins(?:en)?|rente|avs|allocation)\b/i;
   const SKIP_RE = /^(page|seite)\s*\d|^\d+\s*\/\s*\d+$/i;
   const BAL_LABEL = /^(solde|saldo|report|[uü]bertrag|ancien solde|nouveau solde|total|summe|kontostand|balance|ending balance|opening balance)/i;
 
@@ -140,11 +144,12 @@
         const list = amts.slice();
         if (list.length >= 2) { const b = list.pop(); balance = b.sign < 0 ? -b.cents : b.cents; }
         const a = list[0];
-        if (a.sign) { amount = a.sign * a.cents; how = 'signe'; }
+        if (t.typeSign) { amount = t.typeSign * a.cents; how = 'type'; }
+        else if (a.sign) { amount = a.sign * a.cents; how = 'signe'; }
         else if (balance != null && prevBalance != null && Math.abs(balance - prevBalance) === a.cents) { amount = (balance - prevBalance) > 0 ? a.cents : -a.cents; how = 'solde'; }
         else {
           // Sans colonne, signe ni solde : indice par les mots du libellé, toujours signalé « à vérifier ».
-          amount = /\b(salaire|lohn|gehalt|cr[eé]dit(?! ?card)|gutschrift|versement|einzahlung|remboursement|r[uü]ckerstattung)\b/i.test(label) ? a.cents : -a.cents;
+          amount = CREDIT_WORDS.test(label) ? a.cents : -a.cents;
           flags.push('sign-unknown'); how = 'inconnu';
         }
       }
@@ -159,8 +164,8 @@
       const d1 = assignYear(t.dates[0]), d2 = t.dates[1] ? assignYear(t.dates[1]) : null;
       if (!d1) { warnings.push(`Date illisible ignorée : « ${label.slice(0, 60)} »`); return; }
       if (!t.dates[0].hasYear) flags.push('year-inferred');
-      const cm = CUR_RE.exec(label + ' ' + t.cur);
-      const currency = (cm && cm[1]) || stCur;
+      const cm = CUR_RE.exec(label);
+      const currency = (t.amts.find(a => a.cur) || {}).cur || (cm && cm[1]) || stCur;
       if (currency !== 'CHF') flags.push('foreign-currency');
       const rm = /(?:r[eé]f(?:[eé]rence)?\.?|ref\.?-?nr\.?)[:\s]*([A-Z0-9][A-Z0-9 -]{5,})/i.exec(label);
       txs.push({ idx: txs.length, date: d1, dateBooked: d2, label, amount, balance, currency, ref: rm ? rm[1].trim() : null, page: t.page, flags, how });
@@ -183,10 +188,17 @@
       const dates = [];
       for (const c of cells) { if (dates.length < 2) { const p = parseDateCell(c.text); if (p) { dates.push(p); continue; } } break; }
       const rest = cells.slice(dates.length);
-      const amtCells = [], labelCells = [];
+      const amtCells = [], labelCells = []; let typeSign = 0;
       for (const c of rest) {
         const a = parseAmountCell(c.text);
-        if (a && (dates.length || cur)) amtCells.push({ ...a, cx: (c.x + c.x2) / 2 }); else labelCells.push(c.text);
+        if (a && (dates.length || cur)) amtCells.push({ ...a, cx: (c.x + c.x2) / 2 });
+        else if ((dates.length || cur) && TYPE_DEBIT.test(c.text.trim()) && c.text.trim().length > 1) typeSign = -1;
+        else if ((dates.length || cur) && TYPE_CREDIT.test(c.text.trim()) && c.text.trim().length > 1) typeSign = 1;
+        else labelCells.push(c.text);
+      }
+      if (dates.length && !amtCells.length && labelCells.length) {
+        const last = labelCells[labelCells.length - 1], m = /^(.*?)\s+((?:CHF|EUR|USD|GBP)?\s*[-+]?\d[\d'’ ]*[.,]\d{2}[-+]?(?:\s*(?:CHF|EUR|USD|GBP))?)$/.exec(last);
+        const a = m && parseAmountCell(m[2]); if (a) { labelCells[labelCells.length - 1] = m[1]; amtCells.push({ ...a, cx: 1e9 }); }
       }
       if (dates.length && dates[0]) {
         const lab = labelCells.join(' ');
@@ -196,7 +208,7 @@
           continue;
         }
         flush();
-        cur = { dates, label: labelCells, amts: amtCells, page: line.page, cur: '' };
+        cur = { dates, label: labelCells, amts: amtCells, page: line.page, cur: '', typeSign };
       } else if (cur) {
         const lab = labelCells.join(' ');
         if (BAL_LABEL.test(lab.trim()) || BAL_LABEL.test(norm(lab).trim())) {
@@ -205,6 +217,7 @@
           continue;
         }
         cur.label.push(...labelCells);
+        if (typeSign && !cur.typeSign) cur.typeSign = typeSign;
         if (!cur.amts.length && amtCells.length) cur.amts.push(...amtCells);
       } else {
         const lab = labelCells.join(' ');
@@ -234,7 +247,7 @@
     for (const p of PREFIXES) s = s.replace(p, '').trim();
     s = s.replace(/\b\d{2}\.\d{2}(?:\.\d{2,4})?\b/g, ' ').replace(/\b\d{1,2}:\d{2}\b/g, ' ').replace(/[xX*]{2,}\s?\d*/g, ' ')
       .replace(/(?:r[eé]f(?:[eé]rence)?\.?|ref\.?-?nr\.?)[:\s]*[A-Z0-9 -]{4,}/gi, ' ').replace(/\b(?:CHF|EUR|USD)\s*\d[\d.'’]*/gi, ' ')
-      .replace(/^[\s,;:\-–]+/, '').replace(/\s+/g, ' ').trim();
+      .replace(/^[\s,;:\-–]+/, '').replace(/\s+/g, ' ').trim().replace(/^(?:du|le|au|vom|am|à|a)\s+/i, '');
     return s;
   }
   function merchantKey(label) {
@@ -242,18 +255,26 @@
     const toks = norm(cleanLabel(label)).replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(t => t.length >= 2 && !STOP.has(t));
     return toks.slice(0, 2).join(' ');
   }
+  const CITIES = /\b(lausanne|gen[eè]ve|geneve|z[uü]rich|zurich|bern[e]?|fribourg|neuch[aâ]tel|lutry|sion|lugano|basel|b[aâ]le|winterthur|luzern|lucerne|morges|vevey|montreux|yverdon|nyon|renens|pully|prilly|carouge|lancy|vernier|meyrin|ecublens|crissier|bulle|martigny|sierre|monthey|aigle|biel|bienne|olten|aarau|st\.? ?gallen|chur|thun|zug|schaffhausen|locarno|bellinzona)\b/gi;
   function merchantName(label) {
-    const t = cleanLabel(label).split(/\s+/).filter(w => !/^\d+$/.test(w)).slice(0, 3).join(' ');
-    return t ? t.replace(/\b([A-ZÀ-Ý]{3,})\b/g, w => w[0] + w.slice(1).toLowerCase()) : 'Opération';
+    let t = cleanLabel(label);
+    t = t.split(/\s[-–|\/]\s|[,;]\s?|\s(?:carte|card|ref|r[eé]f(?:[eé]rence)?|iban|bic|n°|no\.?|nr\.?|date|montant|cours|taux)\b/i)[0];
+    t = t.replace(/\b\d{4}\s+[A-ZÀ-Ý][\p{L}'-]+/gu, ' ').replace(/\b(?:rue|av\.?|avenue|chemin|ch\.|route|rte|strasse|str\.|gasse|weg|place|pl\.|quai|bd|boulevard)\b.*$/i, ' ')
+      .replace(/\b(?:CH|FR|DE|IT|AT|LU|GB|US)\b$/, ' ').replace(/\b\d+\b/g, ' ').replace(/[*#]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const words = t.split(' ').filter(w => /[\p{L}]/u.test(w));
+    const noCity = words.filter(w => !(new RegExp('^' + CITIES.source + '$', 'i')).test(w));
+    let out = (noCity.length ? noCity : words).slice(0, 3).join(' ');
+    if (out.length > 26) out = out.slice(0, 25).replace(/\s\S*$/, '') || out.slice(0, 25);
+    return out ? out.replace(/\b([A-ZÀ-Ý]{3,})\b/g, w => w[0] + w.slice(1).toLowerCase()) : 'Opération';
   }
   const KW = [
-    { re: /\bcoop\b|migros|denner|aldi|lidl|volg|\bspar\b|carrefour|manor food|epicerie|boulangerie|b[aä]ckerei|boucherie|primeur|pronto/, cat: 'courses' },
-    { re: /\bshell\b|\bbp\b|avia|migrol|agip|\besso\b|tamoil|station[- ]service|tankstelle|\beni\b|carburant|petrol|\boil\b/, cat: 'essence' },
-    { re: /restaurant|mcdonald|burger king|starbucks|pizz|\bcafe\b|bistro|kebab|subway|uber eats|eat\.ch|brasserie|sushi|snack|take ?away|\bbar\b/, cat: 'restaurants' },
-    { re: /\bsbb\b|\bcff\b|\bffs\b|\btpg\b|\btl\b|\bvbz\b|\bbls\b|parking|swisspass|mobility|\buber\b|taxi|\btransports?\b|bus |tram /, cat: 'transport' },
-    { re: /pharmac|apotheke|amavita|sunstore|medecin|docteur|\bdr\.?\b|clinique|hopital|dentiste|physio|optique|laboratoire/, cat: 'sante' },
-    { re: /zara|h&m|\bh ?& ?m\b|amazon|zalando|ikea|digitec|galaxus|mediamarkt|fnac|decathlon|manor|pkz|ochsner|aliexpress|temu/, cat: 'shopping' },
-    { re: /cinema|cin[eé]ma|kino|pathe|fitness|ticketcorner|steam|playstation|nintendo|theatre|concert|musee|bowling|loisir|sport|ski/, cat: 'loisirs' },
+    { re: /\bcoop\b|migros|denner|aldi|lidl|volg\b|\bspar\b|carrefour|manor food|globus (?:delicatessa|food)|epicerie|boulangerie|b[aä]ckerei|boucherie|metzgerei|primeur|pronto|\bavec\b|k ?kiosk|valora|supermarch|hofl|prix garantie|satellite|landi/, cat: 'courses' },
+    { re: /\bshell\b|\bbp\b|avia\b|migrol|agip|\besso\b|tamoil|socar|agrola|station[- ]service|tankstelle|\beni\b|carburant|petrol|\bcoop pronto.*(?:oil|petrol)|\boil\b|total ?energies|ruedi r[uü]sch/, cat: 'essence' },
+    { re: /restaurant|mcdonald|burger king|starbucks|pizz|\bcaf[eé]\b|bistro|kebab|subway|uber ?eats|eat\.ch|just ?eat|smood|brasserie|sushi|snack|take ?away|domino|tea ?room|boulangerie caf|kfc|five guys|wienerberger|auberge|trattoria|osteria|gasthof|pub\b|brewery|tavern|food ?truck/, cat: 'restaurants' },
+    { re: /\bsbb\b|\bcff\b|\bffs\b|\btpg\b|\btl\b|\btpf\b|\bvbz\b|\bzvv\b|\bbls\b|parking|swiss ?pass|mobility|\buber\b|\bbolt\b|taxi|\blime\b|flixbus|vignette|easyride|transports? publics?|tpn|mbc\b|postauto|car postal|autoroute|p\+r/, cat: 'transport' },
+    { re: /pharmac|apotheke|amavita|sunstore|toppharm|m[eé]decin|docteur|\bdr\.? |clinique|h[oô]pital|spital|hirslanden|chuv|dentiste|zahnarzt|physio|optique|optic|laboratoire|medbase|cabinet m[eé]dical|sant[eé]/, cat: 'sante' },
+    { re: /zara|h&m|\bh ?& ?m\b|amazon|zalando|ikea|digitec|galaxus|mediamarkt|media markt|fnac|decathlon|\bmanor\b|globus|pkz|ochsner|aliexpress|temu|jumbo|hornbach|bauhaus|do it|orell|exlibris|ex libris|brack|microspot|interdiscount|conforama|c&a|vero moda|shein|vinted|ricardo|\bpost\b.*colis|nespresso/, cat: 'shopping' },
+    { re: /cinema|cin[eé]ma|kino|path[eé]|fitness|basic-?fit|update fitness|ticketcorner|ticketing|eventfrog|steam|playstation|nintendo|xbox|th[eé][aâ]tre|concert|mus[eé]e|bowling|\bzoo\b|europa-?park|loisir|\bski\b|bains|piscine|golf|escape game|casino|lotterie|loterie|swisslos/, cat: 'loisirs' },
   ];
   const SUB_NAMES = /spotify|netflix|youtube|disney|apple\.com\/bill|apple services|icloud|chatgpt|openai|anthropic|claude\.ai|amazon prime|prime video|adobe|microsoft 365|office 365|google (?:one|storage)|dropbox|deezer|canal\+|dazn|blick\+?|nzz|le temps|tamedia|swisscom blue|sky ?show|paramount|crunchyroll|audible|notion|github|1password|nordvpn/;
   const BILL_HINTS = [
@@ -374,7 +395,9 @@
         // règles et dictionnaires
         if (rule && rule.kind === 'bill') { row.kind = 'bill'; row.billCategory = rule.billCategory || 'Autre'; row.confidence = 0.9; row.reasons.push('Règle mémorisée'); }
         else if (rule && rule.cat) { row.category = rule.cat; row.confidence = 0.9; row.reasons.push('Règle mémorisée pour ce commerçant'); }
-        else {
+        else if (mk && state.expenses.some(e => e.mk === mk && e.category && e.category !== 'divers')) {
+          const prev = state.expenses.filter(e => e.mk === mk && e.category !== 'divers'); row.category = prev[prev.length - 1].category; row.confidence = 0.8; row.reasons.push('Même commerçant déjà catégorisé');
+        } else {
           const bh = BILL_HINTS.find(h => h.re.test(lab));
           if (bh) { row.kind = 'bill'; row.billCategory = bh.bc; row.confidence = 0.65; row.reasons.push(`Ressemble à une facture (${bh.bc}) : sera ajoutée comme facture payée`); }
           else if (SUB_NAMES.test(lab)) { row.category = 'abonnements'; row.confidence = 0.7; row.flags.push('sub-hint'); row.reasons.push('Service d’abonnement connu'); }
@@ -399,6 +422,7 @@
       rows.push(row);
     });
 
+    for (const r of rows) { if (r.kind === 'transfer') r.merchant = 'Virement interne'; else if (r.kind === 'cash') r.merchant = 'Retrait d’espèces'; else if (r.kind === 'cardPayment') r.merchant = 'Carte de crédit'; }
     // virements croisés (même montant, sens inverse, autre compte déjà importé)
     for (const r of rows) {
       if (r.kind !== 'income' && r.kind !== 'expense') continue;
@@ -468,7 +492,7 @@
   }
 
   // ---------- Application ----------
-  const monthsOf = rows => [...new Set(rows.filter(r => r.include).map(r => r.date.slice(0, 7)))].sort();
+  const monthsOf = (state, rows) => [...new Set(rows.filter(r => r.include).map(r => E.periodOf(state, r.date)))].sort();
   function applyPreview(state, preview, ctx = {}) {
     const today = ctx.today || E.localDateStr();
     const res = { created: { expenses: 0, incomes: 0, bills: 0, refunds: 0 }, paid: { bills: 0, subs: 0 }, merged: 0, transfers: 0, ignored: 0, duplicates: 0, errors: [], byCategory: {}, expenseTotal: 0, incomeTotal: 0, months: [] };
@@ -528,7 +552,7 @@
         else if (r.kind === 'expense' && r.category !== 'divers' || (prev.cat && r.kind === 'expense')) state.rules[r.mk] = { ...prev, cat: r.category, kind: 'expense', name: r.merchant };
       }
     }
-    res.months = monthsOf(preview.rows);
+    res.months = monthsOf(state, preview.rows);
     const rec = { id: E.uid(), at: ctx.at || new Date().toISOString(), fileName: ctx.fileName || '', bank: preview.bank, account: preview.account, period: preview.period, ocr: !!preview.ocr,
       counts: { imported: compact.length, expenses: res.created.expenses, incomes: res.created.incomes, merged: res.merged, paid: res.paid.bills + res.paid.subs, duplicates: res.duplicates, ignored: res.ignored },
       errors: res.errors.concat(preview.warnings || []), txs: compact, hash: ctx.hash || null, hasPdf: !!ctx.hasPdf };

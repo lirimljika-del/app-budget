@@ -87,7 +87,7 @@
   function defaultState() {
     return {
       schema: 1,
-      settings: { currency: 'CHF', theme: 'auto', hideAmounts: false, smoothSubs: false, importDateMode: 'tx', dashOrder: null, ownAccounts: [], keepPdf: false },
+      settings: { payday: { on: false, day: 25, adjust: true, fromYm: null, asked: false }, currency: 'CHF', theme: 'auto', hideAmounts: false, smoothSubs: false, importDateMode: 'tx', dashOrder: null, ownAccounts: [], keepPdf: false },
       categories: DEFAULT_CATEGORIES.map(c => ({ ...c, builtin: true, limits: [] })),
       incomes: [], bills: [], expenses: [], goals: [], subs: [], imports: [], importKeys: [], rules: {},
     };
@@ -124,31 +124,78 @@
     return n;
   }
 
+  // ---------- Début de mois = jour de salaire (option) ----------
+  // Une « période » porte le nom du mois où commence le salaire. Sans réglage : mois civil.
+  // Règle jours ouvrés : samedi → vendredi (la veille), dimanche → lundi (le lendemain).
+  const payCfg = st => { const p = st && st.settings && st.settings.payday; return p && p.on ? p : null; };
+  function paydayDate(state, ym) {
+    const p = (state.settings && state.settings.payday) || { day: 1, adjust: false };
+    let d = `${ym}-${pad(clampDay(ym, p.day))}`;
+    if (p.adjust) { const dow = new Date(dayNum(d) * 86400000).getUTCDay(); if (dow === 6) d = addDays(d, -1); else if (dow === 0) d = addDays(d, 1); }
+    return d;
+  }
+  const calRange = ym => ({ from: `${ym}-01`, to: `${ym}-${pad(dimOf(ym))}` });
+  // Nom de la période : salaire tôt dans le mois (jour ≤ 15) → mois de début ; salaire tardif (≥ 16) → mois de fin
+  // (le salaire du 25 octobre ouvre la période « novembre »).
+  const byEnd = p => p.day >= 16;
+  function payRange(state, ym, p) {
+    const a = byEnd(p) ? addMonths(ym, -1) : ym;
+    return { from: paydayDate(state, a), to: addDays(paydayDate(state, addMonths(a, 1)), -1) };
+  }
+  function periodRange(state, ym) {
+    const p = payCfg(state); if (!p) return calRange(ym);
+    const f = p.fromYm || '0000-00';
+    if (ym < addMonths(f, -1)) return calRange(ym);
+    if (ym === addMonths(f, -1)) { const from = `${ym}-01`, to = addDays(payRange(state, f, p).from, -1); return { from, to: to < from ? from : to }; }   // transition : mois civil raccourci/allongé une seule fois
+    return payRange(state, ym, p);
+  }
+  function periodOf(state, iso) {
+    const m = iso.slice(0, 7);
+    for (const ym of [m, addMonths(m, -1), addMonths(m, 1)]) { const r = periodRange(state, ym); if (iso >= r.from && iso <= r.to) return ym; }
+    return m;
+  }
+  const monthsAround = (from, to) => { const out = []; for (let m = addMonths(from.slice(0, 7), -1), end = addMonths(to.slice(0, 7), 1); m <= end; m = addMonths(m, 1)) out.push(m); return out; };
+  function setPayday(state, cfg, today) {
+    const day = Math.round(+cfg.day);
+    if (!(day >= 1 && day <= 31)) throw new Error('Jour invalide (1 à 31)');
+    if (!cfg.on) { state.settings.payday = { ...state.settings.payday, on: false, asked: true }; return; }
+    // La période en cours démarre au dernier salaire reçu ; seule la fin du mois civil précédent est raccourcie
+    // (les mois plus anciens ne sont jamais redécoupés).
+    const conf = { on: true, day, adjust: !!cfg.adjust }, tmp = { settings: { payday: conf } }, cm = today.slice(0, 7);
+    let F = cfg.fromYm || null;
+    for (let i = -1; !F && i <= 2; i++) { const lab = addMonths(cm, i), r = payRange(tmp, lab, conf); if (today >= r.from && today <= r.to) F = lab; }
+    state.settings.payday = { ...conf, fromYm: F || cm, asked: true };
+  }
+
   // ---------- Occurrences mensuelles ----------
   function incomeOccurrences(state, ym) {
     const out = [];
     for (const inc of state.incomes) {
       if (inc.type === 'oneoff') {
-        if (inc.date.slice(0, 7) === ym) out.push({ id: inc.id, name: inc.name, amount: inc.amount, date: inc.date, recurring: false, desc: inc.desc || '' });
+        if (inc.date.slice(0, 7) === ym) out.push({ id: inc.id, name: inc.name, amount: inc.amount, date: inc.date, ym, recurring: false, desc: inc.desc || '' });
       } else {
         if (inc.stopFrom && ym >= inc.stopFrom) continue;
         const v = valueAt(inc.versions, ym);
         if (!v) continue;
         const ov = inc.overrides && inc.overrides[ym];
+        const p = payCfg(state), base = `${ym}-${pad(clampDay(ym, v.day))}`;
+        const isSalary = p && inc.salary !== false && (inc.salary === true || v.day === p.day);
         out.push({
-          id: inc.id, name: inc.name, amount: ov !== undefined ? ov : v.amount, baseAmount: v.amount,
-          date: `${ym}-${pad(clampDay(ym, v.day))}`, recurring: true, overridden: ov !== undefined, desc: inc.desc || '',
+          id: inc.id, name: inc.name, amount: ov !== undefined ? ov : v.amount, baseAmount: v.amount, ym,
+          date: isSalary ? paydayDate(state, ym) : base, recurring: true, overridden: ov !== undefined, desc: inc.desc || '',
         });
       }
     }
     return out.sort((a, b) => (a.date < b.date ? -1 : 1));
   }
 
+  const incomeOccurrencesRange = (state, from, to) => monthsAround(from, to).flatMap(m => incomeOccurrences(state, m)).filter(o => o.date >= from && o.date <= to).sort((a, b) => (a.date < b.date ? -1 : 1));
+  const billOccurrencesRange = (state, from, to, today) => monthsAround(from, to).flatMap(m => billOccurrences(state, m, today)).filter(o => o.dueDate >= from && o.dueDate <= to).sort((a, b) => (a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : 0));
   function billOccurrences(state, ym, today) {
     const out = [];
     const push = (bill, amount, dueDate, paidDate, extra) => {
       const status = paidDate ? 'paid' : (today && dueDate < today ? 'overdue' : 'pending');
-      out.push({ id: bill.id, name: bill.name, category: bill.category, amount, dueDate, paidDate: paidDate || null, status, desc: bill.desc || '', ...extra });
+      out.push({ id: bill.id, name: bill.name, category: bill.category, amount, dueDate, paidDate: paidDate || null, status, desc: bill.desc || '', ym, ...extra });
     };
     for (const b of state.bills) {
       if (b.type === 'oneoff') {
@@ -221,8 +268,9 @@
     });
     return out.sort((a, b) => (a.due < b.due ? -1 : 1));
   }
-  function subOccurrences(state, ym, today) {
-    const out = [], from = `${ym}-01`, to = `${ym}-${pad(dimOf(ym))}`;
+  function subOccurrences(state, ym, today) { return subOccurrencesRange(state, `${ym}-01`, `${ym}-${pad(dimOf(ym))}`, today); }
+  function subOccurrencesRange(state, from, to, today) {
+    const out = [];
     for (const s of state.subs || []) {
       for (const d of subDueDates(s, from, to)) {
         const paidDate = (s.paid && s.paid[d.due]) || null;
@@ -241,7 +289,7 @@
   function subProvision(state, ym) {
     const res = { on: !!(state.settings && state.settings.smoothSubs), total: 0, items: [], smoothed: new Set() };
     if (!res.on) return res;
-    const mStart = `${ym}-01`, mEnd = `${ym}-${pad(dimOf(ym))}`;
+    const { from: mStart, to: mEnd } = periodRange(state, ym);
     for (const s of state.subs || []) {
       const v = subVersionAt(s, mEnd);
       if (!v || !['quarterly', 'semiannual', 'annual'].includes(v.freq)) continue;
@@ -270,7 +318,7 @@
     }
     upcoming.sort((a, b) => (a.due < b.due ? -1 : 1));
     if (upcoming.length) next = upcoming[0];
-    const m = computeMonth(state, today.slice(0, 7), today);
+    const m = computeMonth(state, periodOf(state, today), today);
     return { count: act.length, monthly, annual, next, upcoming, plannedThisMonth: m.subsActual, countedThisMonth: m.subsTotal };
   }
   function upcomingReminders(state, today) {
@@ -347,18 +395,18 @@
   }
 
   function computeMonth(state, ym, today) {
-    const dim = dimOf(ym);
-    const cur = today.slice(0, 7);
-    const rel = ym < cur ? 'past' : ym > cur ? 'future' : 'current';
-    const dayNum = rel === 'current' ? Number(today.slice(8, 10)) : rel === 'past' ? dim : 0;
+    const { from, to } = periodRange(state, ym);
+    const dim = diffDays(from, to) + 1;
+    const rel = today < from ? 'future' : today > to ? 'past' : 'current';
+    const dayNum = rel === 'current' ? diffDays(from, today) + 1 : rel === 'past' ? dim : 0;
     const daysLeft = rel === 'current' ? dim - dayNum + 1 : rel === 'future' ? dim : 0;
 
-    const incomes = incomeOccurrences(state, ym);
-    const bills = billOccurrences(state, ym, today);
-    const expenses = state.expenses.filter(e => e.date.slice(0, 7) === ym)
+    const incomes = incomeOccurrencesRange(state, from, to);
+    const bills = billOccurrencesRange(state, from, to, today);
+    const expenses = state.expenses.filter(e => e.date >= from && e.date <= to)
       .sort((a, b) => (a.date === b.date ? (a.ts || 0) - (b.ts || 0) : a.date < b.date ? -1 : 1));
     const savings = savingsPlan(state, ym);
-    const subsOcc = subOccurrences(state, ym, today);
+    const subsOcc = subOccurrencesRange(state, from, to, today);
     const prov = subProvision(state, ym);
 
     const income = sum(incomes, i => i.amount);
@@ -399,7 +447,7 @@
 
     const committed = billsTotal + subsTotal + spent + reserved;
     return {
-      ym, rel, dim, dayNum, daysLeft, income, incomes, bills, billsTotal, billsPaid, billsUnpaid,
+      ym, from, to, rel, dim, dayNum, daysLeft, income, incomes, bills, billsTotal, billsPaid, billsUnpaid,
       billsOverdue: bills.filter(b => b.status === 'overdue'), subsOcc, subsActual, subsPaid, subsUnpaid: subsActual - subsPaid,
       subsTotal, subsProvision: prov.on ? prov.total : 0, subsSmoothed: prov.on,
       subsOverdue: subsOcc.filter(b => b.status === 'overdue'), spent, expenses, reserved, savings, remaining,
@@ -421,7 +469,7 @@
     // Mois en cours : on le compare au mois précédent jusqu'au même jour (comparaison équitable).
     const lastM = months[months.length - 1];
     const prevSpent = sum(prev, (m, i) => (i === prev.length - 1 && lastM.rel === 'current')
-      ? sum(m.expenses.filter(e => Number(e.date.slice(8, 10)) <= lastM.dayNum), e => e.amount) : m.spent);
+      ? sum(m.expenses.filter(e => diffDays(m.from, e.date) + 1 <= lastM.dayNum), e => e.amount) : m.spent);
     const byCat = new Map();
     for (const m of months) for (const r of m.cats) if (r.spent) {
       const cur = byCat.get(r.cat.id) || { cat: r.cat, spent: 0 };
@@ -444,7 +492,7 @@
     const m = computeMonth(state, ym, today);
     const last = m.rel === 'current' ? m.dayNum : m.rel === 'past' ? m.dim : 0;
     const perDay = Array.from({ length: m.dim }, () => 0);
-    for (const e of m.expenses) perDay[Number(e.date.slice(8, 10)) - 1] += e.amount;
+    for (const e of m.expenses) perDay[diffDays(m.from, e.date)] += e.amount;
     let acc = 0;
     const cumul = perDay.map((v, i) => (i < last ? (acc += v) : null));
     return { dim: m.dim, last, perDay, cumul, month: m };
@@ -593,6 +641,7 @@
     addExpense, updateExpense, deleteExpense, addIncome, addBill, editRecurring, updateOneoff, clearOverride, stopRecurring,
     removeItem, setBillPaid, duplicateBill, addGoal, setGoalMonthly, setCategoryLimit, addCategory, deleteCategory,
     validateState, exportData, parseImport, migrate,
+    paydayDate, periodRange, periodOf, setPayday, incomeOccurrencesRange, billOccurrencesRange, subOccurrencesRange,
     dayNum, fromDayNum, addDays, diffDays, addMonthsClamp, SUB_FREQ, SUB_STATUS, subDueDates, subOccurrences, subProvision, subVersionAt,
     monthlyEquivalent, annualCost, nextDue, lastPaidOf, subsSummary, upcomingReminders, subsToIcs, addSub, setSubPaid, changeSubPrice,
     setSubStatus, subCancelDate, addRefund,

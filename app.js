@@ -11,7 +11,9 @@
   const MS = ['Jan', 'Fév', 'Mar', 'Avr', 'Mai', 'Juin', 'Juil', 'Août', 'Sep', 'Oct', 'Nov', 'Déc'];
   const wdOf = iso => new Date(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10)).getDay();
   const todayStr = () => E.localDateStr();
-  const curYm = () => todayStr().slice(0, 7);
+  const curYm = () => (state ? E.periodOf(state, todayStr()) : todayStr().slice(0, 7));
+  const pfrom = ym => E.periodRange(state, ym).from;
+  const rangeLabel = ym => { const r = E.periodRange(state, ym); return `${E.fmtDate(r.from).slice(0, 5)} → ${E.fmtDate(r.to).slice(0, 5)}`; };
   const BILL_EMOJI = { 'Loyer': '🏠', 'Assurance maladie': '🏥', 'Assurance auto': '🚗', 'Autre assurance': '🛡️', 'Téléphone': '📱', 'Internet': '🌐', 'Abonnement': '🔁', 'Leasing': '🚙', 'Impôts': '🏛️', 'Autre': '🧾' };
   const METHODS = ['Carte', 'Espèces', 'TWINT', 'Autre'];
   const EMOJIS = ['🏷️', '🐶', '🎁', '📚', '🏋️', '✈️', '🎮', '☕', '👕', '🔧', '🏠', '💡', '👶', '🎓', '🚗', '🍺'];
@@ -87,7 +89,7 @@
   const bar = (pct, cls) => `<div class="bar ${cls || ''}"><i style="width:${Math.max(0, Math.min(100, pct || 0))}%"></i></div>`;
   const dateLabel = iso => `${WD[wdOf(iso)]} ${E.fmtDate(iso)}`;
   const empty = (t, s) => `<div class="empty"><b>${t}</b>${s || ''}</div>`;
-  const monthNav = ym => `<div class="monthnav"><button data-act="mprev" aria-label="Mois précédent">${ic('chevL')}</button><b>${E.monthLabel(ym)}</b><button data-act="mnext" aria-label="Mois suivant">${ic('chevR')}</button></div>`;
+  const monthNav = ym => `<div class="monthnav"><button data-act="mprev" aria-label="Mois précédent">${ic('chevL')}</button><b>${E.monthLabel(ym)}${state.settings.payday.on ? `<small style="display:block;font-weight:500;color:var(--muted);font-size:11.5px;text-align:center">${rangeLabel(ym)}</small>` : ''}</b><button data-act="mnext" aria-label="Mois suivant">${ic('chevR')}</button></div>`;
   const backBtn = (label, act = 'back') => `<button class="back" data-act="${act}">${ic('chevL')}${esc(label)}</button>`;
 
   function expenseRow(e) {
@@ -134,9 +136,11 @@
   }
   function upcomingItems(m, t) {
     const items = [...m.bills.filter(b => b.status !== 'paid').map(b => ({ ...b, kind: 'bill' })), ...m.subsOcc.filter(b => b.status !== 'paid').map(b => ({ ...b, kind: 'sub' }))];
-    const nm = E.addMonths(m.ym, 1), horizon = E.addDays(t, 21);
-    for (const b of E.billOccurrences(state, nm, t)) if (b.dueDate <= horizon && b.status !== 'paid') items.push({ ...b, kind: 'bill' });
-    for (const b of E.subOccurrences(state, nm, t)) if (b.dueDate <= horizon && b.status !== 'paid') items.push({ ...b, kind: 'sub' });
+    const horizon = E.addDays(t, 21), start = E.addDays(m.to, 1);
+    if (start <= horizon) {
+      for (const b of E.billOccurrencesRange(state, start, horizon, t)) if (b.status !== 'paid') items.push({ ...b, kind: 'bill' });
+      for (const b of E.subOccurrencesRange(state, start, horizon, t)) if (b.status !== 'paid') items.push({ ...b, kind: 'sub' });
+    }
     return items.sort((a, b) => (a.dueDate < b.dueDate ? -1 : 1));
   }
   const SECTIONS = {
@@ -381,6 +385,8 @@
         <button class="item" data-act="openCategories"><span class="m"><div class="t">Catégories et limites</div><div class="s">Plafonds mensuels de dépenses</div></span>${ic('chevR', 'chev')}</button>
         <button class="item" data-act="openSavings"><span class="m"><div class="t">Épargne et objectifs</div><div class="s">Montants réservés chaque mois</div></span>${ic('chevR', 'chev')}</button>
         <button class="item" data-act="goSubs"><span class="m"><div class="t">Abonnements</div><div class="s">${state.subs.length} enregistré${state.subs.length > 1 ? 's' : ''}</div></span>${ic('chevR', 'chev')}</button></div></div>
+      <div class="group-h"><span>Mois</span></div><div class="card set-card"><div class="list">
+        <button class="item" data-act="paydayOpen"><span class="m"><div class="t">Début du mois</div><div class="s">${state.settings.payday.on ? 'À l’arrivée du salaire (le ' + state.settings.payday.day + (state.settings.payday.adjust ? ', jours ouvrés' : '') + ')' : 'Le 1er du mois (calendrier)'}</div></span>${ic('chevR', 'chev')}</button></div></div>
       <div class="group-h"><span>Relevés bancaires</span></div><div class="card set-card"><div class="list">
         <button class="item" data-act="importOpen"><span class="m"><div class="t">Importer un relevé PDF</div><div class="s">Lecture 100 % locale sur cet iPhone</div></span>${ic('chevR', 'chev')}</button>
         <button class="item" data-act="importHistory"><span class="m"><div class="t">Historique des importations</div><div class="s">${state.imports.length} import${state.imports.length > 1 ? 's' : ''}</div></span>${ic('chevR', 'chev')}</button>
@@ -442,9 +448,21 @@
   function chips(list, selected, act) {
     return list.map(o => `<button type="button" class="chip ${o.id === selected ? 'on' : ''}" data-act="${act}" data-id="${esc(o.id)}">${o.icon ? o.icon + ' ' : ''}${esc(o.name)}</button>`).join('');
   }
+  function paydaySheet(first) {
+    const p = state.settings.payday; form = { pm: p.on ? 'pay' : (first ? 'pay' : 'cal') };
+    const sample = d => `${WD[wdOf(d)]} ${E.fmtDate(d)}`;
+    const cfg = { settings: { payday: { day: 25, adjust: true } } };
+    openSheet(`<h3>${first ? 'Quand commence ton mois ?' : 'Début du mois'}</h3><p class="note" style="margin:-6px 2px 12px">Choisis le point de départ de ton budget : tous les calculs (reste, budget quotidien, archives) suivent cette période.</p>
+      <div class="seg"><button class="${form.pm === 'cal' ? 'on' : ''}" data-act="paydayMode" data-v="cal">Le 1er du mois</button><button class="${form.pm === 'pay' ? 'on' : ''}" data-act="paydayMode" data-v="pay">À mon salaire</button></div>
+      <div id="pd-opts" style="${form.pm === 'pay' ? '' : 'display:none'}"><div class="field"><label>Jour de versement du salaire</label><input class="in" id="pd-day" inputmode="numeric" value="${p.day}"></div>
+      <div class="switch"><span>Ajuster aux jours ouvrés<br><small style="color:var(--muted)">Samedi → vendredi, dimanche → lundi. Les jours fériés ne sont pas pris en compte.</small></span><input type="checkbox" id="pd-adj" ${p.adjust !== false ? 'checked' : ''}></div>
+      <div class="note">Exemple avec un salaire le 25 : en juillet 2026 il tombe le ${sample(E.paydayDate(cfg, '2026-07'))} (le 25 est un samedi) et en octobre 2026 le ${sample(E.paydayDate(cfg, '2026-10'))} (le 25 est un dimanche).<br>Ta période en cours démarre au dernier salaire reçu ; seule la fin du mois précédent est raccourcie, les mois plus anciens ne bougent pas. Nom du mois : si ton salaire arrive après le 15, la période porte le mois où elle se termine (salaire du 25 septembre → « octobre »).</div>
+</div>
+      <div class="err"></div><div class="actions"><button class="btn" data-act="paydaySave">Enregistrer</button>${first ? '<button class="btn sec" data-act="paydaySkip">Plus tard</button>' : ''}</div>`);
+  }
   function expenseSheet(id) {
     const e = id ? state.expenses.find(x => x.id === id) : null;
-    const vm = ui.viewMonth, def = vm === curYm() ? todayStr() : vm + '-01';
+    const vm = ui.viewMonth, def = vm === curYm() ? todayStr() : pfrom(vm);
     form = { id, cat: e ? e.category : (lastCat && state.categories.some(c => c.id === lastCat) ? lastCat : state.categories[0].id), method: e ? e.method || '' : '' };
     openSheet(`<h3>${e ? 'Modifier la dépense' : 'Nouvelle dépense'}</h3>
       <div class="field"><input class="in amount num" id="f-amt" inputmode="decimal" placeholder="0.00" value="${e ? E.formatMoney(e.amount).replace(/’/g, '') : ''}" autofocus autocomplete="off"><div style="text-align:center;color:var(--muted);font-weight:600">${esc(cur())}</div></div>
@@ -463,7 +481,7 @@
     const ok = await commit(() => { if (isNew) E.addExpense(state, f); else E.updateExpense(state, form.id, f); });
     if (!ok) return;
     closeSheet();
-    const m = month(date.slice(0, 7)), c = m.cats.find(r => r.cat.id === f.category);
+    const m = month(E.periodOf(state, date)), c = m.cats.find(r => r.cat.id === f.category);
     let msg = isNew ? 'Dépense ajoutée' : 'Dépense modifiée';
     if (m.rel === 'current') msg += m.daily.mode === 'ok' ? ` · ${E.formatMoney(m.daily.perDay, { auto: true })} ${cur()}/jour` : m.daily.mode === 'deficit' ? ' · budget dépassé' : '';
     if (c && c.status === 'warn') msg += ` · ${c.cat.name} : ${c.pct} % de la limite`;
@@ -473,12 +491,12 @@
 
   function billSheet(id) {
     const ym = ui.viewMonth;
-    const occ = id ? E.billOccurrences(state, ym, todayStr()).find(b => b.id === id) : null;
+    const occ = id ? month(ym).bills.find(b => b.id === id) : null;
     const item = id ? state.bills.find(b => b.id === id) : null;
     const rec = item ? item.type === 'recurring' : true;
-    form = { id, type: rec ? 'recurring' : 'oneoff', cat: item ? item.category : 'Loyer', freq: occ && occ.freq || 'monthly' };
-    const v = item && rec ? E.valueAt(item.versions, ym) || item.versions[0] : null;
-    const defDate = ym === curYm() ? todayStr() : ym + '-01';
+    form = { id, occYm: occ ? occ.ym : ym, type: rec ? 'recurring' : 'oneoff', cat: item ? item.category : 'Loyer', freq: occ && occ.freq || 'monthly' };
+    const v = item && rec ? E.valueAt(item.versions, form.occYm) || item.versions[0] : null;
+    const defDate = ym === curYm() ? todayStr() : pfrom(ym);
     openSheet(`<h3>${item ? 'Modifier la facture' : 'Nouvelle facture'}</h3>
       ${item ? '' : `<div class="seg" style="margin-bottom:6px"><button class="on" data-act="billType" data-v="recurring">Récurrente</button><button data-act="billType" data-v="oneoff">Exceptionnelle</button></div>`}
       <div class="field"><label>Nom</label><input class="in" id="f-name" maxlength="60" value="${esc(item ? item.name : '')}" placeholder="Ex. Assurance maladie" autofocus></div>
@@ -494,7 +512,7 @@
     if (!item) { form.type = 'recurring'; }
   }
   async function saveBill() {
-    const ym = ui.viewMonth, name = val('f-name'), cents = E.parseMoney(val('f-amt'));
+    const ym = form.occYm || ui.viewMonth, name = val('f-name'), cents = E.parseMoney(val('f-amt'));
     if (!name) return setErr('Donne un nom à la facture.');
     if (cents == null || cents < 0) return setErr('Montant invalide.');
     const base = { name, category: val('f-bcat'), desc: val('f-desc'), amount: cents };
@@ -515,7 +533,7 @@
         if (form.type === 'oneoff') E.addBill(state, { type: 'oneoff', ...base, date });
         else E.addBill(state, { type: 'recurring', ...base, from: date.slice(0, 7), day: Number(date.slice(8, 10)), freq: val('f-freq') });
       });
-      if (ok && date.slice(0, 7) !== ui.viewMonth) ui.viewMonth = date.slice(0, 7), render();
+      if (ok && E.periodOf(state, date) !== ui.viewMonth) ui.viewMonth = E.periodOf(state, date), render();
     }
     if (ok) { closeSheet(); toast('Facture enregistrée'); }
   }
@@ -524,33 +542,36 @@
     const ym = ui.viewMonth;
     const item = id ? state.incomes.find(i => i.id === id) : null;
     const rec = item ? item.type === 'recurring' : true;
-    const occ = item ? E.incomeOccurrences(state, ym).find(i => i.id === id) : null;
-    const v = item && rec ? E.valueAt(item.versions, ym) || item.versions[0] : null;
-    form = { id, type: rec ? 'recurring' : 'oneoff' };
+    const occ = item ? month(ym).incomes.find(i => i.id === id) : null;
+    const oy = occ ? occ.ym : ym;
+    const v = item && rec ? E.valueAt(item.versions, oy) || item.versions[0] : null;
+    form = { id, occYm: oy, type: rec ? 'recurring' : 'oneoff' };
     const amount = occ ? occ.amount : v ? v.amount : item ? item.amount : null;
     openSheet(`<h3>${item ? 'Modifier le revenu' : 'Nouveau revenu'}</h3>
       ${item ? '' : `<div class="seg" style="margin-bottom:6px"><button class="on" data-act="incType" data-v="recurring">Récurrent</button><button data-act="incType" data-v="oneoff">Exceptionnel</button></div>`}
       <div class="field"><label>Nom</label><input class="in" id="f-name" maxlength="60" value="${esc(item ? item.name : '')}" placeholder="Ex. Salaire" autofocus></div>
       <div class="field"><label>Montant (${esc(cur())})</label><input class="in num" id="f-amt" inputmode="decimal" placeholder="0.00" value="${amount != null ? E.formatMoney(amount).replace(/’/g, '') : ''}"></div>
       ${item && rec ? `<div class="field"><label>Jour de versement (1–31)</label><input class="in" id="f-day" inputmode="numeric" value="${v.day || 1}"></div>`
-        : `<div class="field"><label id="l-date">Date de début</label><input class="in" type="date" id="f-date" value="${item ? item.date : (ym === curYm() ? todayStr() : ym + '-01')}"></div>`}
+        : `<div class="field"><label id="l-date">Date de début</label><input class="in" type="date" id="f-date" value="${item ? item.date : (ym === curYm() ? todayStr() : pfrom(ym))}"></div>`}
       <div class="field"><label>Description (facultatif)</label><input class="in" id="f-desc" maxlength="120" value="${esc(item ? item.desc : '')}"></div>
-      ${item && rec ? `<div class="switch"><span>Modifier seulement ${E.monthLabel(ym)}<br><small style="color:var(--muted)">Les autres mois ne changent pas</small></span><input type="checkbox" id="f-once"></div>` : ''}
+      ${rec && state.settings.payday.on ? `<div class="switch" style="margin-top:8px"><span>Salaire principal<br><small style="color:var(--muted)">Versé le jour ouvré avant/après un week-end : il ouvre ton mois</small></span><input type="checkbox" id="f-salary" ${item ? (item.salary === true || (item.salary !== false && v && v.day === state.settings.payday.day) ? 'checked' : '') : ''}></div>` : ''}
+      ${item && rec ? `<div class="switch" style="margin-top:8px"><span>Modifier seulement ${E.monthLabel(ym)}<br><small style="color:var(--muted)">Les autres mois ne changent pas</small></span><input type="checkbox" id="f-once"></div>` : ''}
       <div class="err"></div><div class="actions"><button class="btn" data-act="saveIncome">Enregistrer</button></div>`);
   }
   async function saveIncome() {
-    const ym = ui.viewMonth, name = val('f-name'), cents = E.parseMoney(val('f-amt'));
+    const ym = form.occYm || ui.viewMonth, name = val('f-name'), cents = E.parseMoney(val('f-amt'));
     if (!name) return setErr('Donne un nom au revenu.');
     if (cents == null || cents < 0) return setErr('Montant invalide.');
     const item = form.id ? state.incomes.find(i => i.id === form.id) : null;
+    const salEl = document.getElementById('f-salary'), salary = salEl ? salEl.checked : undefined;
     let ok;
     if (item) {
       if (item.type === 'oneoff') { const date = val('f-date'); if (!E.isValidDate(date)) return setErr('Date invalide.'); ok = await commit(() => E.updateOneoff(item, { name, amount: cents, date, desc: val('f-desc') })); }
-      else { const day = parseInt(val('f-day'), 10); if (!(day >= 1 && day <= 31)) return setErr('Jour entre 1 et 31.'); ok = await commit(() => E.editRecurring(item, ym, { name, desc: val('f-desc'), amount: cents, day }, $('#f-once').checked)); }
+      else { const day = parseInt(val('f-day'), 10); if (!(day >= 1 && day <= 31)) return setErr('Jour entre 1 et 31.'); ok = await commit(() => { E.editRecurring(item, ym, { name, desc: val('f-desc'), amount: cents, day }, $('#f-once').checked); if (salary !== undefined) item.salary = salary; }); }
     } else {
       const date = val('f-date'); if (!E.isValidDate(date)) return setErr('Date invalide.');
-      ok = await commit(() => E.addIncome(state, form.type === 'oneoff' ? { type: 'oneoff', name, amount: cents, date, desc: val('f-desc') } : { type: 'recurring', name, amount: cents, from: date.slice(0, 7), day: Number(date.slice(8, 10)), desc: val('f-desc') }));
-      if (ok && date.slice(0, 7) !== ui.viewMonth) ui.viewMonth = date.slice(0, 7), render();
+      ok = await commit(() => { const inc = E.addIncome(state, form.type === 'oneoff' ? { type: 'oneoff', name, amount: cents, date, desc: val('f-desc') } : { type: 'recurring', name, amount: cents, from: date.slice(0, 7), day: Number(date.slice(8, 10)), desc: val('f-desc') }); if (salary !== undefined && inc.type === 'recurring') inc.salary = salary; });
+      if (ok && E.periodOf(state, date) !== ui.viewMonth) ui.viewMonth = E.periodOf(state, date), render();
     }
     if (ok) { closeSheet(); toast('Revenu enregistré'); }
   }
@@ -672,6 +693,15 @@
     yprev() { ui.archiveYear--; render(); }, ynext() { ui.archiveYear++; render(); },
     openMonth(el) { ui.viewMonth = el.dataset.ym; ui.page = 'month'; ui.animate = true; render(); },
     goBills() { ui.viewMonth = curYm(); go('bills'); }, goExpenses() { ui.viewMonth = curYm(); go('expenses'); },
+    paydayOpen() { paydaySheet(false); },
+    paydayMode(el) { form.pm = el.dataset.v; document.querySelectorAll('[data-act=paydayMode]').forEach(b => b.classList.toggle('on', b === el)); document.getElementById('pd-opts').style.display = form.pm === 'pay' ? '' : 'none'; },
+    async paydaySave() {
+      const on = form.pm === 'pay', day = parseInt(val('pd-day'), 10), adjust = document.getElementById('pd-adj').checked;
+      if (on && !(day >= 1 && day <= 31)) return setErr('Jour entre 1 et 31.');
+      const ok = await commit(() => { E.setPayday(state, { on, day: on ? day : state.settings.payday.day, adjust, }, todayStr()); ui.viewMonth = curYm(); });
+      if (ok) { closeSheet(); toast(on ? `Ton mois commence à l’arrivée du salaire (période en cours : ${E.monthLabel(curYm()).toLowerCase()})` : 'Mois calendaire (du 1er à la fin du mois)'); }
+    },
+    paydaySkip() { state.settings.payday.asked = true; persist(); closeSheet(); },
     billsTab(el) { ui.billsTab = el.dataset.v; render(); },
     goSubs() { ui.billsTab = 'subs'; ui.viewMonth = curYm(); go('bills'); },
     dashEdit() {
@@ -703,7 +733,7 @@
     },
     saveBill,
     billMenu(el) {
-      const ym = ui.viewMonth, b = E.billOccurrences(state, ym, todayStr()).find(x => x.id === el.dataset.id); if (!b) return;
+      const ym = ui.viewMonth, b = month(ym).bills.find(x => x.id === el.dataset.id); if (!b) return;
       const [cls, lbl] = STAT[b.status];
       openSheet(`<h3>${esc(b.name)}</h3><div class="card" style="margin-top:0"><div class="kpi"><div class="v">${mcur(b.amount)}</div><div class="k">Échéance ${E.fmtDate(b.dueDate)} · <span class="pill ${cls}">${lbl}</span>${b.paidDate ? ' le ' + E.fmtDate(b.paidDate) : ''}</div></div></div>
         <div class="menu">
@@ -712,13 +742,13 @@
           <button class="red" data-act="delBill" data-id="${b.id}">Supprimer</button></div>`);
     },
     togglePaid(el) {
-      const b = state.bills.find(x => x.id === el.dataset.id), occ = E.billOccurrences(state, ui.viewMonth, todayStr()).find(x => x.id === b.id);
-      closeSheet(); commit(() => E.setBillPaid(b, ui.viewMonth, occ.status === 'paid' ? null : todayStr()), { msg: occ.status === 'paid' ? 'Paiement annulé' : 'Facture marquée payée — budget inchangé' });
+      const b = state.bills.find(x => x.id === el.dataset.id), occ = month(ui.viewMonth).bills.find(x => x.id === b.id);
+      closeSheet(); commit(() => E.setBillPaid(b, occ.ym, occ.status === 'paid' ? null : todayStr()), { msg: occ.status === 'paid' ? 'Paiement annulé' : 'Facture marquée payée — budget inchangé' });
     },
     editBill(el) { billSheet(el.dataset.id); },
     dupBill(el) { closeSheet(); commit(() => E.duplicateBill(state, el.dataset.id), { msg: 'Facture dupliquée', undo: true }); },
     delBill(el) {
-      const b = state.bills.find(x => x.id === el.dataset.id), ym = ui.viewMonth;
+      const b = state.bills.find(x => x.id === el.dataset.id), oc = month(ui.viewMonth).bills.find(x => x.id === b.id), ym = oc ? oc.ym : ui.viewMonth;
       if (b.type === 'oneoff') return confirmSheet('Supprimer cette facture ?', esc(b.name) + ' sera supprimée.', [{ label: 'Supprimer', cls: 'danger', fn: () => commit(() => E.removeItem(state, 'bills', b.id), { msg: 'Facture supprimée', undo: true }) }]);
       confirmSheet('Supprimer la facture récurrente ?', `« ${esc(b.name)} » : choisis ce qui est conservé.`, [
         { label: `Arrêter à partir de ${E.monthLabel(ym)} (garde l’historique)`, cls: '', fn: () => commit(() => E.stopRecurring(b, ym), { msg: 'Facture arrêtée', undo: true }) },
@@ -729,15 +759,15 @@
     incType(el) { form.type = el.dataset.v; document.querySelectorAll('[data-act=incType]').forEach(b => b.classList.toggle('on', b === el)); $('#l-date').textContent = form.type === 'recurring' ? 'Date de début' : 'Date'; },
     saveIncome,
     incomeMenu(el) {
-      const ym = ui.viewMonth, i = state.incomes.find(x => x.id === el.dataset.id), occ = E.incomeOccurrences(state, ym).find(x => x.id === i.id);
+      const ym = ui.viewMonth, i = state.incomes.find(x => x.id === el.dataset.id), occ = month(ym).incomes.find(x => x.id === i.id);
       openSheet(`<h3>${esc(i.name)}</h3><div class="menu"><button data-act="editIncome" data-id="${i.id}">Modifier</button>
         ${occ && occ.overridden ? `<button data-act="clearOv" data-id="${i.id}">Rétablir le montant habituel pour ${E.monthLabel(ym)}</button>` : ''}
         <button class="red" data-act="delIncome" data-id="${i.id}">Supprimer</button></div>`);
     },
     editIncome(el) { incomeSheet(el.dataset.id); },
-    clearOv(el) { closeSheet(); commit(() => E.clearOverride(state.incomes.find(x => x.id === el.dataset.id), ui.viewMonth), { msg: 'Montant rétabli' }); },
+    clearOv(el) { const oc = month(ui.viewMonth).incomes.find(x => x.id === el.dataset.id); closeSheet(); commit(() => E.clearOverride(state.incomes.find(x => x.id === el.dataset.id), oc ? oc.ym : ui.viewMonth), { msg: 'Montant rétabli' }); },
     delIncome(el) {
-      const i = state.incomes.find(x => x.id === el.dataset.id), ym = ui.viewMonth;
+      const i = state.incomes.find(x => x.id === el.dataset.id), oc = month(ui.viewMonth).incomes.find(x => x.id === i.id), ym = oc ? oc.ym : ui.viewMonth;
       if (i.type === 'oneoff') return confirmSheet('Supprimer ce revenu ?', esc(i.name), [{ label: 'Supprimer', cls: 'danger', fn: () => commit(() => E.removeItem(state, 'incomes', i.id), { msg: 'Revenu supprimé', undo: true }) }]);
       confirmSheet('Supprimer le revenu récurrent ?', `« ${esc(i.name)} »`, [
         { label: `Arrêter à partir de ${E.monthLabel(ym)} (garde l’historique)`, cls: '', fn: () => commit(() => E.stopRecurring(i, ym), { msg: 'Revenu arrêté', undo: true }) },
@@ -807,10 +837,16 @@
   });
   function checkDayChange() {
     const t = todayStr();
-    if (t !== ui.lastDay) { const wasCur = ui.viewMonth === ui.lastDay.slice(0, 7); ui.lastDay = t; if (wasCur) ui.viewMonth = curYm(); render(); }
+    if (t !== ui.lastDay) { const wasCur = ui.viewMonth === E.periodOf(state, ui.lastDay); ui.lastDay = t; if (wasCur) ui.viewMonth = curYm(); render(); }
   }
   setInterval(checkDayChange, 30000);
 
+  // Écran de chargement : visible au moins ~1,1 s (marque + barre), puis fondu.
+  function hideSplash() {
+    const el = document.getElementById('splash'); if (!el) return;
+    const wait = Math.max(0, 1100 - (performance.now() - (window.__t0 || 0)));
+    setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 450); }, wait);
+  }
   async function start() {
     try {
       state = await Store.load();
@@ -819,11 +855,13 @@
       Store.persist();
       await Store.autoBackup(state, todayStr());
     } catch (e) {
-      $('#app').innerHTML = `<div class="card"><h2>Erreur de stockage</h2>${esc(e.message)}</div>`; return;
+      $('#app').innerHTML = `<div class="card"><h2>Erreur de stockage</h2>${esc(e.message)}</div>`; hideSplash(); return;
     }
     if (await Lock.enabled()) await showUnlock();
     render();
     if (App.notifyReminders) App.notifyReminders();
+    if (!state.settings.payday.asked && !state.incomes.length && !state.expenses.length) setTimeout(() => paydaySheet(true), 1400);
+    hideSplash();
     if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) navigator.serviceWorker.register('sw.js').catch(() => {});
   }
   Object.assign(App, { A, ui, esc, ic, P, money, mcur, bar, barCls, empty, monthNav, backBtn, catOf, month, todayStr, curYm, cur, commit, persist, toast, openSheet, closeSheet, confirmSheet, val, setErr,

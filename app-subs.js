@@ -22,17 +22,17 @@
     <span class="a">${money(o.amount)}<small class="pill ${App.STAT[o.status][0]}" style="margin-top:3px">${App.STAT[o.status][1]}</small></span></button>`;
 
   function calendar(ym, m) {
-    const today = todayStr(), first = new Date(+ym.slice(0, 4), +ym.slice(5, 7) - 1, 1).getDay(), lead = (first + 6) % 7, dim = E.dimOf(ym);
+    const today = todayStr(), from = m.from, first = new Date(E.dayNum(from) * 86400000).getUTCDay(), lead = (first + 6) % 7, dim = m.dim;
     const by = {};
     for (const o of m.subsOcc) (by[o.dueDate] = by[o.dueDate] || []).push({ t: 's', paid: o.status === 'paid' });
     for (const b of m.bills) (by[b.dueDate] = by[b.dueDate] || []).push({ t: 'b', paid: b.status === 'paid' });
     let h = `<div class="cal">${['L', 'M', 'M', 'J', 'V', 'S', 'D'].map(d => `<div class="dow">${d}</div>`).join('')}${'<div class="blank"></div>'.repeat(lead)}`;
-    for (let d = 1; d <= dim; d++) {
-      const iso = `${ym}-${E.pad(d)}`, items = (by[iso] || []).slice(0, 3);
-      h += `<button data-act="calDay" data-d="${iso}" class="${iso === today ? 'today' : ''} ${ui.calDay === iso ? 'sel' : ''}" aria-label="${E.fmtDate(iso)}">${d}<span class="dots">${items.map(i => `<i class="${i.t === 'b' ? 'b' : ''} ${i.paid ? 'p' : ''}"></i>`).join('')}</span></button>`;
+    for (let d = 0; d < dim; d++) {
+      const iso = E.addDays(from, d), items = (by[iso] || []).slice(0, 3);
+      h += `<button data-act="calDay" data-d="${iso}" class="${iso === today ? 'today' : ''} ${ui.calDay === iso ? 'sel' : ''}" aria-label="${E.fmtDate(iso)}">${+iso.slice(8, 10)}<span class="dots">${items.map(i => `<i class="${i.t === 'b' ? 'b' : ''} ${i.paid ? 'p' : ''}"></i>`).join('')}</span></button>`;
     }
     h += '</div><div class="legend" style="margin-top:8px"><span><i style="background:var(--accent)"></i>Abonnement</span><span><i style="background:var(--c-bill)"></i>Facture</span><span>Points pâles = payé</span></div>';
-    if (ui.calDay && ui.calDay.slice(0, 7) === ym) {
+    if (ui.calDay && ui.calDay >= m.from && ui.calDay <= m.to) {
       const occ = m.subsOcc.filter(o => o.dueDate === ui.calDay), bl = m.bills.filter(b => b.dueDate === ui.calDay);
       h += `<div class="group-h" style="margin-top:12px"><span>${App.dateLabel(ui.calDay)}</span></div>` + (occ.length || bl.length ? `<div class="list">${occ.map(occRow).join('')}${bl.map(App.billRow).join('')}</div>` : '<div class="note">Aucun paiement ce jour-là.</div>');
     }
@@ -149,7 +149,7 @@
     calDay(el) { ui.calDay = ui.calDay === el.dataset.d ? null : el.dataset.d; App.render(); },
     subMenu(el) {
       const s = st().subs.find(x => x.id === el.dataset.id); if (!s) return;
-      const today = todayStr(), ym = ui.viewMonth, occ = E.subOccurrences(st(), ym, today).find(o => o.id === s.id), nd = E.nextDue(s, today), lp = E.lastPaidOf(s), v = E.subVersionAt(s, today) || s.versions[0];
+      const today = todayStr(), ym = ui.viewMonth, occ = App.month(ym).subsOcc.find(o => o.id === s.id), nd = E.nextDue(s, today), lp = E.lastPaidOf(s), v = E.subVersionAt(s, today) || s.versions[0];
       const target = occ || (nd && { dueDate: nd.due, status: 'pending', amount: nd.amount });
       openSheet(`<h3>${esc(s.name)}</h3><div class="card" style="margin-top:0"><div class="kpi"><div class="v">${mcur(v.amount)} <small style="font-size:14px;color:var(--muted)">/ ${E.SUB_FREQ[v.freq || 'monthly'].label.toLowerCase()}</small></div>
         <div class="k">${E.SUB_STATUS[s.status]} · début ${E.fmtDate(s.startDate)}${lp ? ' · dernier paiement ' + E.fmtDate(lp.paidDate) : ''}</div>
